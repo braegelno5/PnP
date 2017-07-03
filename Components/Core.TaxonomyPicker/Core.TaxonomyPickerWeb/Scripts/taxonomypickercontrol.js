@@ -77,7 +77,7 @@
             //get ALL terms for the termset and we will organize them in the async callback
             this.RawTerms = this.RawTermSet.getAllTerms();
             spContext.load(this.RawTermSet);
-            spContext.load(this.RawTerms, 'Include(Id,Name,PathOfTerm,Labels,CustomProperties,LocalCustomProperties)');
+            spContext.load(this.RawTerms, 'Include(Id,Name,PathOfTerm,Labels,CustomProperties,LocalCustomProperties,IsDeprecated)');
             spContext.executeQueryAsync(Function.createDelegate(this, this.termsLoadedSuccess), Function.createDelegate(this, this.termsLoadedFailed));
         },
         //internal callback when terms are returned from CSOM
@@ -91,22 +91,50 @@
 
             //get flat list of terms
             this.FlatTerms = new Array();
-            while (termEnumerator.moveNext()) {
-                var currentTerm = termEnumerator.get_current();
-                var term = new Term(currentTerm);
-                this.FlatTerms.push(term);
-            }
+                        
+            var sortOrder = null;
 
             var topLevel = 0;
-            //sort by Name that all of the choice will return alphabetically
-            this.FlatTerms.sort(function (a, b) {
-                if (a.Level > topLevel) { topLevel = a.Level; }
-                a = a.Name.toLowerCase();
-                b = b.Name.toLowerCase();
-                if (a < b) return -1;
-                if (a > b) return 1;
-                return 0;
-            });
+
+            while (termEnumerator.moveNext()) {
+                var currentTerm = termEnumerator.get_current();
+                if (!currentTerm.get_isDeprecated()) {
+                    var term = new Term(currentTerm);
+                    this.FlatTerms.push(term);
+                }
+            }
+
+            //get the custom sort order of the termset
+            if (this.RawTermSet.get_customSortOrder()) {
+                sortOrder = this.RawTermSet.get_customSortOrder();
+            }
+
+            if (sortOrder) {
+                //the custom sort order is a GUID string, separated by :
+                sortOrder = sortOrder.split(':');
+
+                this.FlatTerms.sort(function (a, b) {
+                    if (a.Level > topLevel) { topLevel = a.Level; }
+                    // finding the index of GUID in array, and using it to sort
+                    var indexA = sortOrder.indexOf(a.guid);
+                    var indexB = sortOrder.indexOf(b.guid);
+
+                    if (indexA > indexB) { return 1; }
+                    else if (indexA < indexB) { return -1; }
+                    return 0;
+                });
+            }
+            else {
+                //sort by Name that all of the choice will return alphabetically
+                this.FlatTerms.sort(function (a, b) {
+                    if (a.Level > topLevel) { topLevel = a.Level; }
+                    a = a.Name.toLowerCase();
+                    b = b.Name.toLowerCase();
+                    if (a < b) return -1;
+                    else if (a > b) return 1;
+                    return 0;
+                });
+            }
 
 
             var filterTerm;
@@ -122,10 +150,10 @@
                         if (term.Level == currentLevel) {
                             var path = term.PathOfTerm.split(';');
                             if (
+							    typeof (filterTerm) == 'undefined' ||
                                 ((path.length == this.LevelToShowTerms && this.FilterTermId != null && this.FilterTermId == term.Id) ||
-                                (this.FilterTermId != null && term.PathOfTerm.indexOf(filterTerm.Name) > -1 && this.LevelToShowTerms - 1 == term.Level)
-
-                                ) || typeof (filterTerm) == 'undefined') {
+                                (this.FilterTermId != null && term.PathOfTerm.indexOf(filterTerm.Name) > -1 && this.LevelToShowTerms - 1 == term.Level))
+								) {
 
                                 if (currentLevel == 0) {
                                     this.Terms.push(term.clone());
@@ -331,16 +359,13 @@
             });
 
             //load translation files
-            if (typeof CAMControl.resourceLoaded == 'undefined') {
-                CAMControl.resourceLoaded = false;
+            if (!window.TaxonomyPickerConsts) {
                 var resourceFileName = scriptUrl + '_resources.' + this.Language.substring(0, 2).toLowerCase() + '.js';
 
                 jQuery.ajax({
                     dataType: "script",
                     cache: true,
                     url: resourceFileName
-                }).done(function () {
-                    CAMControl.resourceLoaded = true;
                 }).fail(function () {
                     alert('Could not load the resource file ' + resourceFileName);
                 });
@@ -368,11 +393,19 @@
                 this._control.empty().append(this._editor).append(this._hiddenValidated);
             }
 
-
-
-
             //initialize value if it exists
-            if (this._initialValue != undefined && this._initialValue.length > 0) {
+            if (this._initialLabels) {
+                //When the termset is loaded, terms with the supplied labels are initially selected
+                this.TermSet.OnTermsLoaded = Function.createDelegate(this, function () {
+                    for (var j = 0; j < this._initialLabels.length; j++) {
+                        var terms = this.TermSet.getTermsByLabel(this._initialLabels[j]);
+                        for (var i = 0; i < terms.length; i++) {
+                            this.pushSelectedTerm(terms[i]);
+                        }
+                    }
+                    this._editor.html(this.selectedTermsToHtml());
+                });
+            } else if (this._initialValue != undefined && this._initialValue.length > 0) {
                 var terms = JSON.parse(this._initialValue);
                 for (var i = 0; i < terms.length; i++) {
                     //add the term to selected terms array
@@ -437,6 +470,13 @@
                     newText = rawText.substring(0, caret - selection.length) + this.MarkerMarkup + rawText.substring(caret, rawText.length);
                     var textValidation = this.validateText(newText);
                     this._editor.html(textValidation.html);
+                    
+                    if (newText === '<span id="caretmarker"></span>') {
+                        //empty the selected term from hidden field
+                        this._hiddenValidated.val("");
+                        //added to trigger the change event 
+                        this._hiddenValidated.trigger('change');
+                    }
 
                     //set the cursor position at the marker
                     this.setCaret();
@@ -451,6 +491,13 @@
                     newText = firstPart + this.MarkerMarkup + rawText.substring(caret, rawText.length);
                     var textValidation = this.validateText(newText);
                     this._editor.html(textValidation.html);
+                    
+                    if (newText === '<span id="caretmarker"></span>') {
+                        //empty the selected term from hidden field
+                        this._hiddenValidated.val("");
+                        //added to trigger the change event 
+                        this._hiddenValidated.trigger('change');
+                    }
 
                     //call keyDownCallback event if not null
                     if (this.TermSet.KeyDownCallback != null)
@@ -685,6 +732,7 @@
             //reset this._selectedTerms
             this._selectedTerms = newTerms;
             this._hiddenValidated.val(JSON.stringify(this._selectedTerms));
+            this._hiddenValidated.trigger('change');
 
             return textValidation;
         },
@@ -712,6 +760,7 @@
                        		
                        		this._selectedTerms.push(termNew);
                 			this._hiddenValidated.val(JSON.stringify(this._selectedTerms));
+                			this._hiddenValidated.trigger('change');
                 			
                 			this.pushSelectedTerm(termNew);
 
@@ -1139,6 +1188,8 @@
                 //add the term to the selected terms array            
                 this._selectedTerms.push(clonedTerm);
                 this._hiddenValidated.val(JSON.stringify(this._selectedTerms));
+                //added to trigger change event 
+                this._hiddenValidated.trigger('change');
             }
         },
         //if the term already exists in the selected terms then don't add it
@@ -1155,6 +1206,8 @@
             //remove the last selected term
             this._selectedTerms.pop();
             this._hiddenValidated.val(JSON.stringify(this._selectedTerms));
+            //added to trigger change event 
+            this._hiddenValidated.trigger('change');
         },
         //converts this._selectedTerms to html for an editor field
         selectedTermsToHtml: function () {
